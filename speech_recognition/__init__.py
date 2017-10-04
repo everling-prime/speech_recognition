@@ -1099,6 +1099,64 @@ class Recognizer(AudioSource):
         return "\n".join(transcription)
 
 
+    def recognize_ibm_custom(self, audio_data, username, password, language="en-US", show_all=False):
+        """
+        Performs speech recognition on ``audio_data`` (an ``AudioData`` instance), using the IBM Speech to Text API.
+
+        The IBM Speech to Text username and password are specified by ``username`` and ``password``, respectively. Unfortunately, these are not available without `signing up for an account <https://console.ng.bluemix.net/registration/>`__. Once logged into the Bluemix console, follow the instructions for `creating an IBM Watson service instance <https://www.ibm.com/watson/developercloud/doc/getting_started/gs-credentials.shtml>`__, where the Watson service is "Speech To Text". IBM Speech to Text usernames are strings of the form XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX, while passwords are mixed-case alphanumeric strings.
+
+        The recognition language is determined by ``language``, an RFC5646 language tag with a dialect like ``"en-US"`` (US English) or ``"zh-CN"`` (Mandarin Chinese), defaulting to US English. The supported language values are listed under the ``model`` parameter of the `audio recognition API documentation <https://www.ibm.com/watson/developercloud/speech-to-text/api/v1/#sessionless_methods>`__, in the form ``LANGUAGE_BroadbandModel``, where ``LANGUAGE`` is the language value.
+
+        Returns the most likely transcription if ``show_all`` is false (the default). Otherwise, returns the `raw API response <https://www.ibm.com/watson/developercloud/speech-to-text/api/v1/#sessionless_methods>`__ as a JSON dictionary.
+
+        Raises a ``speech_recognition.UnknownValueError`` exception if the speech is unintelligible. Raises a ``speech_recognition.RequestError`` exception if the speech recognition operation failed, if the key isn't valid, or if there is no internet connection.
+        """
+        assert isinstance(audio_data, AudioData), "Data must be audio data"
+        assert isinstance(username, str), "``username`` must be a string"
+        assert isinstance(password, str), "``password`` must be a string"
+
+        flac_data = audio_data.get_flac_data(
+            convert_rate=None if audio_data.sample_rate >= 16000 else 16000,  # audio samples should be at least 16 kHz
+            convert_width=None if audio_data.sample_width >= 2 else 2  # audio samples should be at least 16-bit
+        )
+
+        keywords = ['Erin']
+        url = "https://stream.watsonplatform.net/speech-to-text/api/v1/recognize?{}".format(urlencode({
+            "speaker_labels": "true",
+            "profanity_filter": "false",
+            "model": "{}_BroadbandModel".format(language),
+            "inactivity_timeout": -1,  # don't stop recognizing when the audio stream activity stops
+        }))
+        request = Request(url, data=flac_data, headers={
+            "keywords": str(keywords),
+            "keywords_threshold": "0.01",
+            "Content-Type": "audio/x-flac",
+            "X-Watson-Learning-Opt-Out": "true",  # prevent requests from being logged, for improved privacy
+        })
+        authorization_value = base64.standard_b64encode("{}:{}".format(username, password).encode("utf-8")).decode("utf-8")
+        request.add_header("Authorization", "Basic {}".format(authorization_value))
+        try:
+            response = urlopen(request, timeout=self.operation_timeout)
+        except HTTPError as e:
+            raise RequestError("recognition request failed: {}".format(e.reason))
+        except URLError as e:
+            raise RequestError("recognition connection failed: {}".format(e.reason))
+        response_text = response.read().decode("utf-8")
+        result = json.loads(response_text)
+
+        # return results
+        if show_all: return result
+        if "results" not in result or len(result["results"]) < 1 or "alternatives" not in result["results"][0]:
+            raise UnknownValueError()
+
+        transcription = []
+        for utterance in result["results"]:
+            if "alternatives" not in utterance: raise UnknownValueError()
+            for hypothesis in utterance["alternatives"]:
+                if "transcript" in hypothesis:
+                    transcription.append(hypothesis["transcript"])
+        return "\n".join(transcription)
+
 def get_flac_converter():
     """Returns the absolute path of a FLAC converter executable, or raises an OSError if none can be found."""
     flac_converter = shutil_which("flac")  # check for installed version first
